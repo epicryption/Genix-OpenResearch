@@ -1,0 +1,149 @@
+import gzip
+import os
+import re
+import subprocess
+from collections import Counter
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from Bio import SeqIO
+
+# Set plotting style
+sns.set_theme(style="whitegrid")
+
+def parse_uniprot_header(header):
+    """Parses common UniProt FASTA header attributes like OS, OX, GN, PE, SV"""
+    res = {
+        "accession": "", "entry_name": "", "description": "",
+        "organism": "", "organism_id": "", "gene_name": "",
+        "protein_existence": "", "sequence_version": ""
+    }
+    parts = header.split('|')
+    if len(parts) >= 3:
+        res["accession"] = parts[1]
+        remainder = parts[2]
+    else:
+        res["accession"] = header.split()[0]
+        remainder = " ".join(header.split()[1:])
+        
+    os_match = re.search(r'OS=(.*?)(?=\s\w+=|$)', remainder)
+    ox_match = re.search(r'OX=(\d+)', remainder)
+    gn_match = re.search(r'GN=(.*?)(?=\s\w+=|$)', remainder)
+    pe_match = re.search(r'PE=(\d+)', remainder)
+    sv_match = re.search(r'SV=(\d+)', remainder)
+    
+    if os_match: res["organism"] = os_match.group(1).strip()
+    if ox_match: res["organism_id"] = ox_match.group(1).strip()
+    if gn_match: res["gene_name"] = gn_match.group(1).strip()
+    if pe_match: res["protein_existence"] = pe_match.group(1).strip()
+    if sv_match: res["sequence_version"] = sv_match.group(1).strip()
+    
+    desc_clean = re.sub(r'^\S+\s+', '', remainder)
+    desc_clean = re.split(r'\s[A-Z]{2}=', desc_clean)[0]
+    res["description"] = desc_clean.strip()
+    return res
+
+def run_extended_pipeline(input_file, output_csv, tax_id_blacklist=None):
+    """Processes sequences and yields metrics maps."""
+    if not os.path.exists(input_file):
+        print(f"Error: Input file '{input_file}' not found.")
+        return None, None
+    if tax_id_blacklist is None: tax_id_blacklist = set()
+        
+    parsed_records = []
+    global_amino_acids = Counter()
+    
+    with gzip.open(input_file, "rt") as handle:
+        for record in SeqIO.parse(handle, "fasta"):
+            metadata = parse_uniprot_header(record.description)
+            if metadata["organism_id"] in tax_id_blacklist: continue
+                
+            metadata["sequence_length"] = len(record.seq)
+            metadata["sequence"] = str(record.seq)
+            parsed_records.append(metadata)
+            global_amino_acids.update(metadata["sequence"])
+            
+    df = pd.DataFrame(parsed_records)
+    df_deduped = df.drop_duplicates(subset=['sequence'], keep='first')
+    df_deduped.to_csv(output_csv, index=False)
+    
+    return df_deduped, global_amino_acids
+
+def generate_plots(amino_acid_counts, output_image_path):
+    """Generates an explicit residue frequency plot analysis chart."""
+    if not amino_acid_counts:
+        return
+    total_residues = sum(amino_acid_counts.values())
+    aa_data = sorted(
+        [{"Residue": aa, "Percentage": (count / total_residues) * 100} for aa, count in amino_acid_counts.items()],
+        key=lambda x: x["Percentage"], reverse=True
+    )
+    df_plot = pd.DataFrame(aa_data)
+    
+    plt.figure(figsize=(12, 6))
+    sns.barplot(data=df_plot, x="Residue", y="Percentage", hue="Residue", palette="viridis", legend=False)
+    plt.title("Global Amino Acid Frequency Distribution", fontsize=14, fontweight="bold")
+    plt.xlabel("Amino Acid Residue Code", fontsize=12)
+    plt.ylabel("Relative Abundance Percentage (%)", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(output_image_path, dpi=300)
+    plt.close()
+    print(f"Interactive layout plot compiled and saved to: {output_image_path}")
+
+def run_local_blast(query_sequence_path, db_fasta_path, blast_output_txt):
+    """
+    Automates local BLAST alignment steps using local binary infrastructure definitions.
+    Requires local installation of NCBI BLAST+ tools.
+    """
+    db_name = "generated/local_uniprot_db"
+    print("\nPreparing local BLAST databases processing indices...")
+    
+    # Uncompressing reference payload temporarily for makeblastdb execution
+    uncompressed_fasta = "generated/temp_db.fasta"
+    with gzip.open(db_fasta_path, "rt") as src, open(uncompressed_fasta, "w") as dest:
+        dest.write(src.read())
+        
+    try:
+        # Build local index database files
+        subprocess.run(["makeblastdb", "-in", uncompressed_fasta, "-dbtype", "prot", "-out", db_name], check=True)
+        print("BLAST database indexed cleanly. Commencing target alignment execution...")
+        
+        # Execute alignment search mapping out matches
+        subprocess.run([
+            "blastp", "-query", query_sequence_path, "-db", db_name, 
+            "-out", blast_output_txt, "-outfmt", "0"
+        ], check=True)
+        print(f"Alignment operations complete. Results mapped to: {blast_output_txt}")
+    except FileNotFoundError:
+        print("\n[BLAST Missing Error]: System command line could not locate local standard 'blastp' or 'makeblastdb' configurations.")
+        print("Please configure your system paths or install NCBI BLAST+ suite framework executable profiles.")
+    finally:
+        if os.path.exists(uncompressed_fasta):
+            os.remove(uncompressed_fasta)
+
+if __name__ == "__main__":
+    input_fasta = "generated/uniprotkb_ipr008395_unreviewed.fasta.gz"
+    output_table = "generated/uniprot_extended_analysis_results.csv"
+    output_chart = "generated/residue_frequencies.png"
+    
+    # 1. Processing pipeline dataset steps
+    data_matrix, counts = run_extended_pipeline(input_fasta, output_table, tax_id_blacklist={'9606'})
+    
+    # 2. Rendering distribution analytical diagrams
+    generate_plots(counts, output_chart)
+    
+    # 3. Running targeted structural alignment query matches
+    # Create sample query file to search against database locally
+    query_file = "generated/sample_query.fasta"
+    with open(query_file, "w") as f:
+        f.write(">Query_Target\nMAVRELIISGLVLLALVVWGVIG")
+        
+    run_local_blast(query_file, input_fasta, "generated/blast_alignment_output.txt")
+
+HEADER_FIELDS = .compile(r"\s[A-Z]{2}=")
+OS_PATTERN = re.compile(r"OS=(.*?)(?=\s[A-Z]{2}=|$)")
+OX_PATTERN = re.compile(r"OX=(\d+)")
+GN_PATTERN = re.compile(r"GN=(.*?)(?=\s[A-Z]{2}=|$)")
+PE_PATTERN = re.compile(r"PE=(\d+)")
+SV_PATTERN = re.compile(r"SV=(\d+)")
+
